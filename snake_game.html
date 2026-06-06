@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Realistic Snake Field – Advanced</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+html, body {
+  margin: 0; height: 100%;
+  display: flex; justify-content: center; align-items: center;
+  background: radial-gradient(circle at 30% 30%, #6fcf7a, #2e7d32);
+  font-family: Arial, sans-serif;
+}
+#game-wrapper {
+  padding: 14px;
+  background: #1b5e20;
+  border-radius: 20px;
+  box-shadow: inset 0 0 70px rgba(0,0,0,0.7);
+  position: relative;
+}
+canvas { display: block; border-radius: 14px; background: rgba(255,255,255,0.04); }
+#ui { position: absolute; inset: 0; padding: 10px; pointer-events: none; color: #eaffea; font-weight: bold; }
+#top { display: flex; justify-content: space-between; }
+.overlay {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,0.85);
+  display: none; justify-content: center; align-items: center;
+  color: #b9ffb9; font-size: 42px;
+}
+button {
+  margin-top: 18px; padding: 12px 28px; font-size: 20px;
+  border-radius: 999px; border: none; background: #66bb6a; cursor: pointer;
+}
+</style>
+</head>
+<body>
+<div id="game-wrapper">
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div id="top">
+      <span id="score">Score: 0</span>
+      <span id="high-score">High Score: 0</span>
+    </div>
+    <div style="text-align:center;font-size:13px;">Arrows / WASD · P Pause</div>
+  </div>
+  <div id="pause" class="overlay">PAUSED</div>
+  <div id="over" class="overlay">
+    <div style="text-align:center;">
+      GAME OVER
+      <div id="final" style="font-size:24px;margin-top:10px;"></div>
+      <button id="restart">Play Again</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ========================= AUDIO ========================= */
+const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+function bite(){
+  const now = audioCtx.currentTime;
+  const o1 = audioCtx.createOscillator(), g1 = audioCtx.createGain();
+  o1.type='triangle'; o1.frequency.setValueAtTime(400,now); o1.frequency.exponentialRampToValueAtTime(150,now+0.1);
+  g1.gain.setValueAtTime(0.2,now); g1.gain.exponentialRampToValueAtTime(0.01,now+0.1);
+  o1.connect(g1); g1.connect(audioCtx.destination); o1.start(); o1.stop(now+0.1);
+  const o2 = audioCtx.createOscillator(), g2 = audioCtx.createGain();
+  o2.type='square'; o2.frequency.setValueAtTime(600,now); o2.frequency.exponentialRampToValueAtTime(250,now+0.08);
+  g2.gain.setValueAtTime(0.1,now); g2.gain.exponentialRampToValueAtTime(0.01,now+0.08);
+  o2.connect(g2); g2.connect(audioCtx.destination); o2.start(); o2.stop(now+0.08);
+}
+function gameOverSound() {
+  const duration = 0.7; const o1 = audioCtx.createOscillator(), o2 = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o1.type='sine'; o1.frequency.setValueAtTime(220,audioCtx.currentTime); o1.frequency.exponentialRampToValueAtTime(40,audioCtx.currentTime+duration);
+  o2.type='triangle'; o2.frequency.setValueAtTime(330,audioCtx.currentTime); o2.frequency.exponentialRampToValueAtTime(60,audioCtx.currentTime+duration);
+  g.gain.setValueAtTime(0.25,audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.01,audioCtx.currentTime+duration);
+  o1.connect(g); o2.connect(g); g.connect(audioCtx.destination);
+  o1.start(); o2.start(); o1.stop(audioCtx.currentTime+duration); o2.stop(audioCtx.currentTime+duration);
+}
+
+/* ========================= CONFIG ========================= */
+const GRID=25, BASE_SPEED=260;
+const canvas=document.getElementById("game"), ctx=canvas.getContext("2d");
+function resize(){ const s=Math.min(innerWidth,innerHeight)*0.75; canvas.width=canvas.height=s; }
+resize(); onresize=resize;
+const CELL=()=>canvas.width/GRID;
+
+/* ========================= STATE ========================= */
+let snake, apple, score, speed, last;
+let paused=false, over=false;
+let dir={x:1,y:0}, zoom=1;
+let appleParticles=[], obstacles=[], newObstacles=[], mudParticles=[], applesSinceLastObstacle=0;
+
+/* ========================= SCORE ========================= */
+const scoreEl=document.getElementById("score"), highEl=document.getElementById("high-score");
+let highScore=+localStorage.getItem("snakeHigh")||0;
+function updateScore(){ scoreEl.textContent="Score: "+score; highEl.textContent="High Score: "+highScore; }
+
+/* ========================= INIT ========================= */
+function reset(){
+  snake={x:12,y:12,body:[],len:6}; apple=spawn();
+  score=0; speed=BASE_SPEED; last=performance.now();
+  paused=over=false; zoom=1;
+  appleParticles=[]; obstacles=[]; newObstacles=[]; mudParticles=[]; applesSinceLastObstacle=0;
+  updateScore(); document.getElementById("over").style.display="none";
+}
+
+/* ========================= SPAWN ========================= */
+function spawn(){ 
+  let pos; 
+  do { pos={x:Math.random()*GRID|0, y:Math.random()*GRID|0}; } 
+  while(snake.body.some(s=>s.x===pos.x && s.y===pos.y) || obstacles.some(o=>o.x===pos.x && o.y===pos.y)); 
+  return pos; 
+}
+function spawnObstacle(){ 
+  let pos;
+  do { pos={x:Math.random()*GRID|0,y:Math.random()*GRID|0}; } 
+  while(snake.body.some(s=>s.x===pos.x && s.y===pos.y) || (apple.x===pos.x && apple.y===pos.y) || obstacles.some(o=>o.x===pos.x && o.y===pos.y));
+  newObstacles.push({x:pos.x,y:pos.y,anim:0});
+  // Mud explosion at obstacle spawn
+  for(let i=0;i<15;i++){
+    const angle=Math.random()*Math.PI*2, speed=Math.random()*3+1.5;
+    mudParticles.push({
+      x: pos.x*CELL()+CELL()/2,
+      y: pos.y*CELL()+CELL()/2,
+      vx: Math.cos(angle)*speed,
+      vy: Math.sin(angle)*speed-1,
+      r: Math.random()*3+1,
+      alpha: 1
+    });
+  }
+}
+
+/* ========================= INPUT ========================= */
+addEventListener("keydown", e=>{
+  if(over) return;
+  if(e.key==="p"){ paused=!paused; document.getElementById("pause").style.display=paused?"flex":"none"; return; }
+  if(paused) return;
+  const m={ArrowLeft:[-1,0],a:[-1,0],ArrowRight:[1,0],d:[1,0],ArrowUp:[0,-1],w:[0,-1],ArrowDown:[0,1],s:[0,1]};
+  if(m[e.key]){ const [x,y]=m[e.key]; if(dir.x!==-x||dir.y!==-y) dir={x,y}; }
+});
+
+/* ========================= APPLE PARTICLES ========================= */
+function triggerAppleEffect(x,y){
+  for(let i=0;i<12;i++){
+    const angle=Math.random()*Math.PI*2, speed=Math.random()*3+1;
+    appleParticles.push({x,y,vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed,r:CELL()*0.12+Math.random()*2,alpha:1});
+  }
+}
+function drawAppleEffects(){
+  for(let i=appleParticles.length-1;i>=0;i--){
+    const p=appleParticles[i];
+    ctx.fillStyle=`rgba(255,60,60,${p.alpha})`; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    p.x+=p.vx; p.y+=p.vy; p.vy+=0.05; p.alpha-=0.05;
+    if(p.alpha<=0) appleParticles.splice(i,1);
+  }
+}
+
+/* ========================= MUD PARTICLES ========================= */
+function drawMudParticles(){
+  for(let i=mudParticles.length-1;i>=0;i--){
+    const p=mudParticles[i];
+    ctx.fillStyle=`rgba(101,67,33,${p.alpha})`;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.alpha-=0.03;
+    if(p.alpha<=0) mudParticles.splice(i,1);
+  }
+}
+
+/* ========================= UPDATE ========================= */
+function update(){
+  snake.x=(snake.x+dir.x+GRID)%GRID; snake.y=(snake.y+dir.y+GRID)%GRID; snake.body.unshift({x:snake.x,y:snake.y});
+  if(snake.body.length>snake.len) snake.body.pop();
+
+  // Eat apple
+  if(snake.x===apple.x && snake.y===apple.y){
+    snake.len++; score++; speed-=8;
+    triggerAppleEffect(apple.x*CELL()+CELL()/2, apple.y*CELL()+CELL()/2);
+    apple=spawn(); zoom=1.06; bite();
+    applesSinceLastObstacle++;
+    if(applesSinceLastObstacle>=3){ spawnObstacle(); applesSinceLastObstacle=0; }
+    if(score>highScore){ highScore=score; localStorage.setItem("snakeHigh",highScore); }
+    updateScore();
+  }
+
+  // Self collision
+  for(let i=1;i<snake.body.length;i++) if(snake.x===snake.body[i].x && snake.y===snake.body[i].y) return gameOver();
+
+  // Obstacles collision
+  if(obstacles.some(o=>o.x===snake.x && o.y===snake.y)) return gameOver();
+
+  // Animate new obstacles
+  for(let i=newObstacles.length-1;i>=0;i--){
+    const o=newObstacles[i]; o.anim+=0.15;
+    if(o.anim>=1){ obstacles.push({x:o.x,y:o.y}); newObstacles.splice(i,1); }
+  }
+}
+
+/* ========================= DRAW ========================= */
+function draw(){
+  ctx.setTransform(zoom,0,0,zoom,canvas.width*(1-zoom)/2,canvas.height*(1-zoom)/2);
+  zoom+=(1-zoom)*0.08; ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawGrass(); drawApple(); drawAppleEffects(); drawObstacles(); drawNewObstacles(); drawSnake(); drawMudParticles();
+}
+
+/* 🌾 WIND-REACTIVE GRASS */
+function drawGrass(){
+  const t=performance.now()*0.001; const wind=Math.sin(t*0.7)*6;
+  ctx.strokeStyle="rgba(255,255,255,0.06)";
+  for(let y=0;y<GRID;y++){ for(let x=0;x<GRID;x++){
+    if((x+y)%3!==0) continue;
+    const px=x*CELL()+CELL()/2, py=y*CELL()+CELL(), sway=Math.sin(t+x*0.6+y)*4+wind;
+    ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(px+sway,py-8); ctx.stroke();
+  }}
+}
+
+/* 🍎 DRAW APPLE */
+function drawApple(){
+  ctx.fillStyle="#c62828"; ctx.shadowColor="rgba(0,0,0,0.4)"; ctx.shadowBlur=8;
+  ctx.beginPath();
+  ctx.arc(apple.x*CELL()+CELL()/2, apple.y*CELL()+CELL()/2, CELL()*0.35,0,Math.PI*2); ctx.fill();
+}
+
+/* ========================= DRAW OBSTACLES ========================= */
+function drawObstacles(){
+  ctx.fillStyle="#4e342e"; ctx.shadowColor="rgba(0,0,0,0.4)"; ctx.shadowBlur=4;
+  obstacles.forEach(o=>{ ctx.fillRect(o.x*CELL()+CELL()*0.1, o.y*CELL()+CELL()*0.1, CELL()*0.8, CELL()*0.8); });
+}
+function drawNewObstacles(){
+  newObstacles.forEach(o=>{
+    const s=o.anim<1?o.anim:1; const size=CELL()*0.8*s;
+    ctx.fillStyle=`rgba(78,52,46,${s})`; ctx.shadowBlur=4*s;
+    ctx.fillRect(o.x*CELL()+CELL()/2-size/2, o.y*CELL()+CELL()/2-size/2, size, size);
+    if(s<1){ for(let i=0;i<4;i++){ const angle=Math.random()*Math.PI*2, dist=Math.random()*CELL()*0.3;
+      ctx.fillStyle=`rgba(78,52,46,${s})`; ctx.beginPath();
+      ctx.arc(o.x*CELL()+CELL()/2+Math.cos(angle)*dist, o.y*CELL()+CELL()/2+Math.sin(angle)*dist,2,0,Math.PI*2); ctx.fill();
+    }}
+  });
+}
+
+/* ========================= SNAKE ========================= */
+function drawSnake(){
+  const t=performance.now()*0.01;
+  for(let i=0;i<snake.body.length;i++){
+    const s=snake.body[i]; const phase=i/snake.body.length;
+    const wave=Math.sin(t+i*0.8)*6*(1-phase); const size=CELL()*(0.85-phase*0.6);
+    
+    // Yellow gradient snake
+    const gradient = ctx.createRadialGradient(
+      s.x*CELL()+CELL()/2, s.y*CELL()+CELL()/2, size*0.1,
+      s.x*CELL()+CELL()/2, s.y*CELL()+CELL()/2, size/2
+    );
+    gradient.addColorStop(0,"#fff176"); gradient.addColorStop(0.5,"#ffeb3b"); gradient.addColorStop(1,"#fbc02d");
+    ctx.fillStyle = gradient;
+
+    ctx.beginPath(); ctx.ellipse(s.x*CELL()+CELL()/2+wave,s.y*CELL()+CELL()/2,size/2,size/3,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="rgba(255,255,255,0.08)";
+    ctx.beginPath(); ctx.moveTo(s.x*CELL()+CELL()/2+wave,s.y*CELL()+CELL()/2-size/4);
+    ctx.lineTo(s.x*CELL()+CELL()/2+wave,s.y*CELL()+CELL()/2+size/4); ctx.stroke();
+  }
+  drawHead(t);
+}
+function drawHead(t){
+  const h=snake.body[0], cx=h.x*CELL()+CELL()/2, cy=h.y*CELL()+CELL()/2;
+  ctx.fillStyle="#fdd835"; ctx.beginPath(); ctx.arc(cx,cy,CELL()*0.48,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle="#000"; ctx.beginPath();
+  ctx.arc(cx+dir.x*7-dir.y*4,cy+dir.y*7+dir.x*4,3,0,Math.PI*2);
+  ctx.arc(cx+dir.x*7+dir.y*4,cy+dir.y*7-dir.x*4,3,0,Math.PI*2); ctx.fill();
+  if(Math.sin(t*2)>0.65){ ctx.strokeStyle="#b71c1c"; ctx.lineWidth=2; ctx.beginPath();
+    ctx.moveTo(cx,cy); ctx.lineTo(cx+dir.x*16,cy+dir.y*16); ctx.stroke();
+  }
+}
+
+/* ========================= LOOP ========================= */
+function loop(t){ requestAnimationFrame(loop); if(paused||over) return; if(t-last>speed){update(); last=t;} draw(); }
+
+/* ========================= GAME OVER ========================= */
+function gameOver(){ over=true; document.getElementById("final").textContent="Score: "+score; document.getElementById("over").style.display="flex"; gameOverSound(); }
+
+/* ========================= START ========================= */
+document.getElementById("restart").onclick=reset; reset(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
